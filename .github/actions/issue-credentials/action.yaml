@@ -1,0 +1,160 @@
+name: Issue credentials
+description: Issue AWS credentials
+
+inputs:
+  tracebit-api-token:
+    description: "Tracebit API token"
+    required: true
+
+  write-profile:
+    description: 'Whether to create an AWS profile'
+    required: false
+    default: 'true'
+
+  profile-name:
+    description: 'The name of the AWS profile to create'
+    required: false
+    default: 'global-access-RpvooXr'
+
+  export-env:
+    description: 'Whether to export the AWS credentials as environment variables'
+    required: false
+    default: 'true'
+
+  env-prefix:
+    # Setting this to 'AWS_' will result in environment variables like AWS_ACCESS_KEY_ID (i.e. the expected default)
+    description: 'Prefix to use for AWS environment variables'
+    required: false
+    default: '__AWS__'
+
+  region:
+    description: 'The AWS region to use'
+    required: false
+    default: 'us-east-2'
+
+  continue-on-error:
+    description: 'Whether to ignore errors'
+    required: false
+    default: 'true'
+
+outputs:
+  aws-access-key-id:
+    description: 'The AWS access key ID'
+    value: ${{ steps.credentials.outputs.aws-access-key-id  }}
+  aws-secret-access-key:
+    description: 'The AWS secret access key'
+    value: ${{ steps.credentials.outputs.aws-secret-access-key }}
+  aws-session-token:
+    description: 'The AWS session token'
+    value: ${{ steps.credentials.outputs.aws-session-token }}
+  profile-name:
+    description: 'The name of the AWS profile'
+    value: ${{ inputs.profile-name }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Issue credentials
+      id: credentials
+      continue-on-error: ${{ inputs.continue-on-error == 'true' }}
+      shell: bash
+      run: |
+        for cmd in aws jq; do
+            if ! command -v $cmd &> /dev/null; then
+                echo "Required tool $cmd could not be found."
+                exit 1
+            fi
+        done
+        unique_id=$(uuidgen)
+        echo "Issuing credential with unique_id $unique_id"
+        sleep "$((RANDOM % 5)).$((RANDOM % 10))"
+        input=$(jq -n -c \
+          --arg github_ref "${{ github.ref }}" \
+          --arg github_repo "${{ github.repository }}" \
+          --arg github_run_id "${{ github.run_id }}" \
+          --arg github_sha "${{ github.sha }}" \
+          --arg github_workflow "${{ github.workflow }}" \
+          --arg github_job "${{ github.job }}" \
+          --arg unique_id "$unique_id" \
+          '{
+              "name": "\($github_repo)@\($github_workflow)",
+              "source": "github",  
+              "sourceType": "ci/cd",
+              "types": ["aws"],
+              "labels": ([
+                  {"name": "github.ref", "value": $github_ref},
+                  {"name": "github.repo", "value": $github_repo},
+                  {"name": "github.run_id", "value": $github_run_id},
+                  {"name": "github.sha", "value": $github_sha},
+                  {"name": "github.workflow", "value": $github_workflow},
+                  {"name": "github.job", "value": $github_job},
+                  {"name": "unique_id", "value": $unique_id},
+                  {"name": "deployment_version", "value": "2.0.0"}
+                  ] | map(select(.value | length > 0)))
+          }')
+
+        creds=$(curl -fsS -X POST \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer ${{ inputs.tracebit-api-token }}" \
+          -d "${input}" \
+          "https://ahb2aede.tracebit.com/api/v1/credentials/issue-credentials")
+
+        confirmation_id=$(echo $creds | jq -r .aws.awsConfirmationId)
+        access_key_id=$(echo $creds | jq -r .aws.awsAccessKeyId)
+        secret_access_key=$(echo $creds | jq -r .aws.awsSecretAccessKey)
+        session_token=$(echo $creds | jq -r .aws.awsSessionToken)
+
+        echo "::add-mask::$access_key_id"
+        echo "::add-mask::$secret_access_key"
+        echo "::add-mask::$session_token"
+
+        echo "aws-confirmation-id=$confirmation_id" >> $GITHUB_OUTPUT
+        echo "aws-access-key-id=$access_key_id" >> $GITHUB_OUTPUT
+        echo "aws-secret-access-key=$secret_access_key" >> $GITHUB_OUTPUT
+        echo "aws-session-token=$session_token" >> $GITHUB_OUTPUT
+
+    - name: Write Profile
+      id: write-profile
+      if: ${{ inputs.write-profile == 'true' }}
+      continue-on-error: ${{ inputs.continue-on-error == 'true' }}
+      shell: bash
+      run: |
+        aws configure set --profile ${{ inputs.profile-name }} aws_access_key_id ${{ steps.credentials.outputs.aws-access-key-id }}
+        aws configure set --profile ${{ inputs.profile-name }} aws_secret_access_key ${{ steps.credentials.outputs.aws-secret-access-key }}
+        aws configure set --profile ${{ inputs.profile-name }} aws_session_token ${{ steps.credentials.outputs.aws-session-token }}
+        aws configure set --profile ${{ inputs.profile-name }} region ${{ inputs.region }}
+
+    - name: Export Env
+      id: export-env
+      if: ${{ inputs.export-env == 'true' }}
+      continue-on-error: ${{ inputs.continue-on-error == 'true' }}
+      shell: bash
+      run: |
+        echo "${{ format('{0}{1}', inputs.env-prefix, 'ACCESS_KEY_ID') }}=${{ steps.credentials.outputs.aws-access-key-id }}" >> $GITHUB_ENV
+        echo "${{ format('{0}{1}', inputs.env-prefix, 'SECRET_ACCESS_KEY') }}=${{ steps.credentials.outputs.aws-secret-access-key }}" >> $GITHUB_ENV
+        echo "${{ format('{0}{1}', inputs.env-prefix, 'SESSION_TOKEN') }}=${{ steps.credentials.outputs.aws-session-token }}" >> $GITHUB_ENV
+        echo "${{ format('{0}{1}', inputs.env-prefix, 'REGION') }}=${{ inputs.region }}" >> $GITHUB_ENV
+        echo "${{ format('{0}{1}', inputs.env-prefix, 'DEFAULT_REGION') }}=${{ inputs.region }}" >> $GITHUB_ENV
+        echo "${{ format('{0}{1}', inputs.env-prefix, 'PROFILE') }}=${{ inputs.profile-name }}" >> $GITHUB_ENV
+
+    - name: Confirm
+      id: confirm
+      continue-on-error: ${{ inputs.continue-on-error == 'true' }}
+      shell: bash
+      run: |
+        for cmd in jq; do
+            if ! command -v $cmd &> /dev/null; then
+                echo "Required tool $cmd could not be found."
+                exit 1
+            fi
+        done
+        echo "Confirming credentials with id ${{ steps.credentials.outputs.aws-confirmation-id }}"
+        input=$(jq -n -c \
+          --arg confirmation_id "${{ steps.credentials.outputs.aws-confirmation-id }}" \
+          '{ "id": $confirmation_id }')
+        
+        curl -fsS -X POST \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer ${{ inputs.tracebit-api-token }}" \
+          -d "${input}" \
+          "https://ahb2aede.tracebit.com/api/v1/credentials/confirm-credentials"

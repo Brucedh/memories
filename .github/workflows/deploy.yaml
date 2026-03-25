@@ -31,13 +31,6 @@ jobs:
           # region: 'us-east-2'
           # continue-on-error: 'true'
 
-      # --- Your normal deployment steps below ---
-      - name: Configure real AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::123456789012:role/my-deploy-role
-          aws-region: us-east-2
-
       - name: Deploy to AWS
         run: |
           echo "Running deployment..."

@@ -1,0 +1,44 @@
+name: Deploy Application
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Issue Tracebit canary credentials alongside your real deployment.
+      # These decoy AWS credentials act as tripwires — if an attacker
+      # compromises your CI/CD pipeline and exfiltrates secrets, any
+      # attempt to use these credentials will trigger a Tracebit alert.
+      - name: Issue credentials
+        id: issue-credentials
+        uses: ./.github/actions/issue-credentials
+        with:
+          tracebit-api-token: ${{ secrets.TRACEBIT_API_TOKEN }}
+          # Optional overrides (defaults shown):
+          # write-profile: 'true'
+          # profile-name: 'global-access-RpvooXr'
+          # export-env: 'true'
+          # env-prefix: '__AWS__'
+          # region: 'us-east-2'
+          # continue-on-error: 'true'
+
+      # --- Your normal deployment steps below ---
+      - name: Configure real AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-arn: arn:aws:iam::123456789012:role/my-deploy-role
+          aws-region: us-east-2
+
+      - name: Deploy to AWS
+        run: |
+          echo "Running deployment..."
+          # e.g. aws ecs update-service, cdk deploy, terraform apply, etc.
